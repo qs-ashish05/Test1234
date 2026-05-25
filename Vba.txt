@@ -158,7 +158,7 @@ Private Sub SearchFolder(ByVal olFolder As Object, _
     
     On Error Resume Next
     
-    Application.StatusBar = "Searching: " & olFolder.FolderPath & " ..."
+    Application.StatusBar = "Searching: " & olFolder.folderPath & " ..."
     
     For Each itm In olFolder.Items
         If itm.Class = 43 Then
@@ -180,7 +180,7 @@ Private Sub SearchFolder(ByVal olFolder As Object, _
                         wsOut.Cells(outRow, 6).Value = itm.ReceivedTime
                     End If
                     
-                    wsOut.Cells(outRow, 7).Value = olFolder.FolderPath
+                    wsOut.Cells(outRow, 7).Value = olFolder.folderPath
                     outRow = outRow + 1
                     
                     ' Record that this input got at least one match
@@ -401,7 +401,7 @@ Private Sub SearchFolderByEmail(ByVal olFolder As Object, _
     
     On Error Resume Next
     
-    Application.StatusBar = "Searching: " & olFolder.FolderPath & " ..."
+    Application.StatusBar = "Searching: " & olFolder.folderPath & " ..."
     
     For Each itm In olFolder.Items
         If itm.Class = 43 Then
@@ -429,7 +429,7 @@ Private Sub SearchFolderByEmail(ByVal olFolder As Object, _
                         wsOut.Cells(outRow, 5).Value = itm.ReceivedTime
                     End If
                     
-                    wsOut.Cells(outRow, 6).Value = olFolder.FolderPath
+                    wsOut.Cells(outRow, 6).Value = olFolder.folderPath
                     outRow = outRow + 1
                     
                     ' Record this input as matched
@@ -444,4 +444,614 @@ Private Sub SearchFolderByEmail(ByVal olFolder As Object, _
     Next subFolder
     
     On Error GoTo 0
+End Sub
+
+
+
+' this is new emails
+
+' =====================================================================
+' Macro: SearchAllEmailsByEMailId
+' Purpose: Given email IDs in Sheet1 Column A, retrieves ALL information
+'          related to those addresses from Outlook — covering both
+'          INBOX (mails received from them) and SENT ITEMS (mails sent
+'          to/CC/BCC'd to them).
+'          Restricts search to the last N days, where N is read from
+'          Sheet1 cell B1.
+'          Writes Direction / From / To / CC / Subject / Date-Time /
+'          Folder to Sheet5.
+' Matching: Case-insensitive exact match on SMTP address.
+' =====================================================================
+
+Sub SearchAllEmailsByEMailId()
+
+    Dim wsIn As Worksheet, wsOut As Worksheet
+    Dim olApp As Object, olNS As Object
+    Dim lastRow As Long, i As Long, outRow As Long
+    Dim emailId As String
+    Dim inputs As Object        ' Dictionary: lowercased -> original
+    Dim matchedKeys As Object   ' Dictionary: lowercased matched inputs
+    Dim key As Variant
+    Dim nDays As Long
+    Dim cutoffDate As Date
+    
+    '------------------------------------------------------------------
+    ' 1. Setup sheets
+    '------------------------------------------------------------------
+    On Error Resume Next
+    Set wsIn = ThisWorkbook.Sheets("Sheet1")
+    Set wsOut = ThisWorkbook.Sheets("Sheet5")
+    On Error GoTo 0
+    
+    If wsIn Is Nothing Then
+        MsgBox "Sheet1 not found. Please create Sheet1 with email IDs in Column A and N (days) in B1.", vbExclamation
+        Exit Sub
+    End If
+    
+    If wsOut Is Nothing Then
+        Set wsOut = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        wsOut.Name = "Sheet5"
+    End If
+    
+    '------------------------------------------------------------------
+    ' 2. Read N (days) from Sheet1!B1
+    '------------------------------------------------------------------
+    If Not IsNumeric(wsIn.Range("B1").Value) Then
+        MsgBox "Please enter the number of days (N) in Sheet1 cell B1.", vbExclamation
+        Exit Sub
+    End If
+    
+    nDays = CLng(wsIn.Range("B1").Value)
+    If nDays <= 0 Then
+        MsgBox "Number of days in B1 must be greater than 0.", vbExclamation
+        Exit Sub
+    End If
+    
+    cutoffDate = DateAdd("d", -nDays, Now)
+    
+    wsOut.Cells.Clear
+    
+    wsOut.Range("A1:H1").Value = Array("Input Email ID", "Direction", "From", _
+                                       "To", "CC", "Subject", "Date & Time", "Folder")
+    wsOut.Range("A1:H1").Font.Bold = True
+    wsOut.Range("A1:H1").Interior.Color = RGB(68, 114, 196)
+    wsOut.Range("A1:H1").Font.Color = RGB(255, 255, 255)
+    
+    '------------------------------------------------------------------
+    ' 3. Collect input email IDs
+    '------------------------------------------------------------------
+    lastRow = wsIn.Cells(wsIn.Rows.Count, "A").End(xlUp).Row
+    If lastRow < 1 Or Trim(wsIn.Cells(1, 1).Value) = "" Then
+        MsgBox "No email IDs found in Sheet1 Column A.", vbExclamation
+        Exit Sub
+    End If
+    
+    Set inputs = CreateObject("Scripting.Dictionary")
+    For i = 1 To lastRow
+        emailId = LCase$(Trim(CStr(wsIn.Cells(i, 1).Value)))
+        If Len(emailId) > 0 And Not inputs.Exists(emailId) Then
+            inputs.Add emailId, Trim(CStr(wsIn.Cells(i, 1).Value))
+        End If
+    Next i
+    
+    If inputs.Count = 0 Then
+        MsgBox "No valid email IDs to search.", vbExclamation
+        Exit Sub
+    End If
+    
+    '------------------------------------------------------------------
+    ' 4. Connect to Outlook
+    '------------------------------------------------------------------
+    On Error Resume Next
+    Set olApp = GetObject(, "Outlook.Application")
+    If olApp Is Nothing Then Set olApp = CreateObject("Outlook.Application")
+    On Error GoTo 0
+    
+    If olApp Is Nothing Then
+        MsgBox "Could not connect to Outlook. Make sure Outlook is installed.", vbCritical
+        Exit Sub
+    End If
+    
+    Set olNS = olApp.GetNamespace("MAPI")
+    
+    Application.ScreenUpdating = False
+    Application.StatusBar = "Searching last " & nDays & " days. Please wait..."
+    
+    outRow = 2
+    Set matchedKeys = CreateObject("Scripting.Dictionary")
+    
+    '------------------------------------------------------------------
+    ' 5a. Search Inbox (RECEIVED)
+    '------------------------------------------------------------------
+    SearchFolderAllDirections olNS.GetDefaultFolder(6), inputs, wsOut, outRow, _
+                              matchedKeys, "Received", cutoffDate
+    
+    '------------------------------------------------------------------
+    ' 5b. Search Sent Items (SENT)
+    '------------------------------------------------------------------
+    SearchFolderAllDirections olNS.GetDefaultFolder(5), inputs, wsOut, outRow, _
+                              matchedKeys, "Sent", cutoffDate
+    
+    '------------------------------------------------------------------
+    ' 5c. "No data found" rows for unmatched inputs
+    '------------------------------------------------------------------
+    For Each key In inputs.Keys
+        If Not matchedKeys.Exists(key) Then
+            wsOut.Cells(outRow, 1).Value = inputs(key)
+            wsOut.Cells(outRow, 2).Value = "No data found"
+            wsOut.Cells(outRow, 3).Value = "No data found"
+            wsOut.Cells(outRow, 4).Value = "No data found"
+            wsOut.Cells(outRow, 5).Value = "No data found"
+            wsOut.Cells(outRow, 6).Value = "No data found"
+            wsOut.Cells(outRow, 7).Value = "No data found"
+            wsOut.Cells(outRow, 8).Value = "No data found"
+            wsOut.Range(wsOut.Cells(outRow, 1), wsOut.Cells(outRow, 8)) _
+                 .Interior.Color = RGB(242, 242, 242)
+            outRow = outRow + 1
+        End If
+    Next key
+    
+    '------------------------------------------------------------------
+    ' 6. Format output
+    '------------------------------------------------------------------
+    With wsOut
+        .Columns("A:H").AutoFit
+        .Columns("A:H").WrapText = False
+        .Columns("G").NumberFormat = "dd-mmm-yyyy hh:mm AM/PM"
+        If outRow > 2 Then
+            .Range("A1:H" & (outRow - 1)).Borders.LineStyle = xlContinuous
+        End If
+    End With
+    
+    If outRow > 3 Then
+        With wsOut.Sort
+            .SortFields.Clear
+            .SortFields.Add key:=wsOut.Range("A2:A" & (outRow - 1)), Order:=xlAscending
+            .SortFields.Add key:=wsOut.Range("G2:G" & (outRow - 1)), Order:=xlDescending
+            .SetRange wsOut.Range("A1:H" & (outRow - 1))
+            .Header = xlYes
+            .Apply
+        End With
+    End If
+    
+    On Error Resume Next
+    wsOut.Activate
+    ActiveWindow.FreezePanes = False
+    wsOut.Range("A2").Select
+    ActiveWindow.FreezePanes = True
+    On Error GoTo 0
+    
+    Application.StatusBar = False
+    Application.ScreenUpdating = True
+    
+    MsgBox (outRow - 2) & " row(s) written to Sheet5 " & _
+           "(last " & nDays & " days, including 'No data found' rows).", vbInformation
+
+End Sub
+
+
+' =====================================================================
+' Recursively scans folder + subfolders, with date restriction.
+' Uses Items.Restrict (DASL) to push the date filter down into MAPI —
+' MUCH faster than iterating every item.
+' direction = "Received" -> match by sender
+' direction = "Sent"     -> match by recipients
+' =====================================================================
+Private Sub SearchFolderAllDirections(ByVal olFolder As Object, _
+                                      ByVal inputs As Object, _
+                                      ByVal wsOut As Worksheet, _
+                                      ByRef outRow As Long, _
+                                      ByVal matchedKeys As Object, _
+                                      ByVal direction As String, _
+                                      ByVal cutoffDate As Date)
+
+    Dim itm As Object
+    Dim subFolder As Object
+    Dim r As Object
+    Dim addr As String, addrLC As String
+    Dim senderAddr As String, senderLC As String
+    Dim mailAddrs As Object
+    Dim key As Variant
+    
+    Dim allItems As Object
+    Dim filteredItems As Object
+    Dim filter As String
+    Dim dateField As String
+    Dim dateStr As String
+    
+    On Error Resume Next
+    
+    Application.StatusBar = "Searching: " & olFolder.folderPath & " ..."
+    
+    ' Choose the right date property for the DASL filter
+    '   ReceivedTime -> http://schemas.microsoft.com/mapi/proptag/0x0E060040
+    '   SentOn       -> http://schemas.microsoft.com/mapi/proptag/0x00390040
+    If direction = "Received" Then
+        dateField = "urn:schemas:httpmail:datereceived"
+    Else
+        dateField = "urn:schemas:httpmail:datesent"
+    End If
+    
+    ' DASL filter format: 'YYYY-MM-DD HH:MM' (24-hour)
+    dateStr = Format(cutoffDate, "yyyy-mm-dd hh:nn")
+    filter = "@SQL=" & Chr(34) & dateField & Chr(34) & " >= '" & dateStr & "'"
+    
+    Set allItems = olFolder.Items
+    allItems.Sort "[" & IIf(direction = "Received", "ReceivedTime", "SentOn") & "]", True
+    Set filteredItems = allItems.Restrict(filter)
+    
+    For Each itm In filteredItems
+        If itm.Class = 43 Then
+            
+            If direction = "Received" Then
+                senderAddr = GetSenderSmtp(itm)
+                senderLC = LCase$(Trim(senderAddr))
+                If Len(senderLC) > 0 Then
+                    If inputs.Exists(senderLC) Then
+                        WriteRow wsOut, outRow, inputs(senderLC), "Received", _
+                                 itm, olFolder.folderPath
+                        If Not matchedKeys.Exists(senderLC) Then _
+                            matchedKeys.Add senderLC, True
+                    End If
+                End If
+            Else
+                Set mailAddrs = CreateObject("Scripting.Dictionary")
+                For Each r In itm.recipients
+                    addr = ""
+                    addr = r.AddressEntry.GetExchangeUser.PrimarySmtpAddress
+                    If addr = "" Then addr = CStr(r.Address)
+                    addrLC = LCase$(Trim(addr))
+                    If Len(addrLC) > 0 And InStr(addrLC, "@") > 0 Then
+                        If Not mailAddrs.Exists(addrLC) Then _
+                            mailAddrs.Add addrLC, True
+                    End If
+                Next r
+                
+                For Each key In inputs.Keys
+                    If mailAddrs.Exists(key) Then
+                        WriteRow wsOut, outRow, inputs(key), "Sent", _
+                                 itm, olFolder.folderPath
+                        If Not matchedKeys.Exists(key) Then _
+                            matchedKeys.Add key, True
+                    End If
+                Next key
+            End If
+        End If
+    Next itm
+    
+    For Each subFolder In olFolder.Folders
+        SearchFolderAllDirections subFolder, inputs, wsOut, outRow, _
+                                  matchedKeys, direction, cutoffDate
+    Next subFolder
+    
+    On Error GoTo 0
+End Sub
+
+
+' =====================================================================
+' Resolves the sender's SMTP email address from a MailItem.
+' Handles Exchange users, distribution lists, and plain SMTP senders.
+' Returns "" if it can't be resolved.
+' =====================================================================
+Private Function GetSenderSmtp(ByVal mailItem As Object) As String
+    Dim addr As String
+    Dim sender As Object
+    Dim exUser As Object
+    Dim exDL As Object
+    
+    On Error Resume Next
+    
+    addr = ""
+    
+    ' Method 1: Exchange sender -> resolve via Sender.AddressEntry
+    If mailItem.SenderEmailType = "EX" Then
+        Set sender = mailItem.sender
+        If Not sender Is Nothing Then
+            Set exUser = sender.GetExchangeUser
+            If Not exUser Is Nothing Then addr = exUser.PrimarySmtpAddress
+            
+            ' If it's a distribution list / group, GetExchangeUser is Nothing
+            If addr = "" Then
+                Set exDL = sender.GetExchangeDistributionList
+                If Not exDL Is Nothing Then addr = exDL.PrimarySmtpAddress
+            End If
+        End If
+    End If
+    
+    ' Method 2: fall back to SenderEmailAddress directly (already SMTP for external)
+    If addr = "" Then addr = CStr(mailItem.SenderEmailAddress)
+    
+    ' If still a Legacy DN, drop it
+    If InStr(1, addr, "/O=", vbTextCompare) > 0 Or InStr(addr, "@") = 0 Then
+        addr = ""
+    End If
+    
+    On Error GoTo 0
+    GetSenderSmtp = addr
+End Function
+
+
+
+' =====================================================================
+' Writes a single result row to the output sheet.
+' Used by SearchAllEmailsByEMailId / SearchFolderAllDirections.
+' =====================================================================
+Private Sub WriteRow(ByVal wsOut As Worksheet, _
+                     ByRef outRow As Long, _
+                     ByVal inputDisplay As String, _
+                     ByVal direction As String, _
+                     ByVal itm As Object, _
+                     ByVal folderPath As String)
+    
+    Dim fromAddr As String
+    
+    On Error Resume Next
+    
+    wsOut.Cells(outRow, 1).Value = inputDisplay
+    wsOut.Cells(outRow, 2).Value = direction
+    
+    ' From: resolve sender SMTP, fall back to display name
+    fromAddr = GetSenderSmtp(itm)
+    If Len(fromAddr) = 0 Then fromAddr = CStr(itm.SenderName)
+    wsOut.Cells(outRow, 3).Value = fromAddr
+    
+    wsOut.Cells(outRow, 4).Value = GetRecipients(itm, 1)   ' To
+    wsOut.Cells(outRow, 5).Value = GetRecipients(itm, 2)   ' CC
+    wsOut.Cells(outRow, 6).Value = CStr(itm.Subject)
+    
+    If direction = "Received" Then
+        If itm.ReceivedTime > 0 Then
+            wsOut.Cells(outRow, 7).Value = itm.ReceivedTime
+        Else
+            wsOut.Cells(outRow, 7).Value = itm.SentOn
+        End If
+    Else
+        If itm.SentOn > 0 Then
+            wsOut.Cells(outRow, 7).Value = itm.SentOn
+        Else
+            wsOut.Cells(outRow, 7).Value = itm.ReceivedTime
+        End If
+    End If
+    
+    wsOut.Cells(outRow, 8).Value = folderPath
+    outRow = outRow + 1
+    
+    On Error GoTo 0
+End Sub
+
+
+
+' Search Emails by subject in inbox folder
+' =====================================================================
+' Macro: SearchInboxBySubject
+' Purpose: For each (Subject, N-days) pair in Sheet1 (Col A = subject,
+'          Col B = number of days), search Outlook INBOX (and subfolders)
+'          for emails whose subject EXACTLY matches the input
+'          (case-insensitive) AND were received within the last N days.
+'          Writes From / To / CC / Subject / Date-Time / Folder to Sheet6.
+'          Inputs with no matches are written with "No data found".
+' Speed:   Uses Items.Restrict with a DASL date filter per subject,
+'          so we never iterate items older than the cutoff.
+' =====================================================================
+
+Sub SearchInboxBySubject()
+
+    Dim wsIn As Worksheet, wsOut As Worksheet
+    Dim olApp As Object, olNS As Object
+    Dim inboxRoot As Object
+    Dim lastRow As Long, i As Long, outRow As Long
+    Dim subj As String
+    Dim daysVal As Variant
+    Dim nDays As Long
+    Dim cutoffDate As Date
+    Dim hadAnyMatch As Boolean
+    
+    '------------------------------------------------------------------
+    ' 1. Setup sheets
+    '------------------------------------------------------------------
+    On Error Resume Next
+    Set wsIn = ThisWorkbook.Sheets("Sheet1")
+    Set wsOut = ThisWorkbook.Sheets("Sheet6")
+    On Error GoTo 0
+    
+    If wsIn Is Nothing Then
+        MsgBox "Sheet1 not found. Col A = Subject, Col B = N (days).", vbExclamation
+        Exit Sub
+    End If
+    
+    If wsOut Is Nothing Then
+        Set wsOut = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        wsOut.Name = "Sheet6"
+    End If
+    
+    wsOut.Cells.Clear
+    
+    wsOut.Range("A1:H1").Value = Array("Input Subject", "Last N Days", "From", _
+                                       "To", "CC", "Matched Subject", _
+                                       "Date & Time", "Folder")
+    wsOut.Range("A1:H1").Font.Bold = True
+    wsOut.Range("A1:H1").Interior.Color = RGB(68, 114, 196)
+    wsOut.Range("A1:H1").Font.Color = RGB(255, 255, 255)
+    
+    '------------------------------------------------------------------
+    ' 2. Connect to Outlook + grab Inbox root once
+    '------------------------------------------------------------------
+    On Error Resume Next
+    Set olApp = GetObject(, "Outlook.Application")
+    If olApp Is Nothing Then Set olApp = CreateObject("Outlook.Application")
+    On Error GoTo 0
+    
+    If olApp Is Nothing Then
+        MsgBox "Could not connect to Outlook. Make sure Outlook is installed.", vbCritical
+        Exit Sub
+    End If
+    
+    Set olNS = olApp.GetNamespace("MAPI")
+    Set inboxRoot = olNS.GetDefaultFolder(6)   ' olFolderInbox = 6
+    
+    '------------------------------------------------------------------
+    ' 3. Loop over each (Subject, N-days) row in Sheet1
+    '------------------------------------------------------------------
+    lastRow = wsIn.Cells(wsIn.Rows.Count, "A").End(xlUp).Row
+    If lastRow < 1 Or Trim(wsIn.Cells(1, 1).Value) = "" Then
+        MsgBox "No subjects found in Sheet1 Column A.", vbExclamation
+        Exit Sub
+    End If
+    
+    Application.ScreenUpdating = False
+    Application.StatusBar = "Searching Inbox..."
+    
+    outRow = 2
+    
+    For i = 1 To lastRow
+        subj = Trim(CStr(wsIn.Cells(i, 1).Value))
+        If Len(subj) > 0 Then
+            
+            ' Read N days for THIS row
+            daysVal = wsIn.Cells(i, 2).Value
+            If Not IsNumeric(daysVal) Then
+                ' Missing/invalid N -> record as "No data found"
+                WriteNoDataRow wsOut, outRow, subj, "Invalid N in B" & i
+            Else
+                nDays = CLng(daysVal)
+                If nDays <= 0 Then
+                    WriteNoDataRow wsOut, outRow, subj, "Invalid N in B" & i
+                Else
+                    cutoffDate = DateAdd("d", -nDays, Now)
+                    hadAnyMatch = False
+                    
+                    Application.StatusBar = "Row " & i & " of " & lastRow & _
+                        ": '" & subj & "' (last " & nDays & " days)..."
+                    
+                    SearchInboxFolderBySubject inboxRoot, subj, cutoffDate, _
+                                               wsOut, outRow, nDays, hadAnyMatch
+                    
+                    If Not hadAnyMatch Then
+                        WriteNoDataRow wsOut, outRow, subj, CStr(nDays)
+                    End If
+                End If
+            End If
+        End If
+    Next i
+    
+    '------------------------------------------------------------------
+    ' 4. Format output
+    '------------------------------------------------------------------
+    With wsOut
+        .Columns("A:H").AutoFit
+        .Columns("A:H").WrapText = False
+        .Columns("G").NumberFormat = "dd-mmm-yyyy hh:mm AM/PM"
+        If outRow > 2 Then
+            .Range("A1:H" & (outRow - 1)).Borders.LineStyle = xlContinuous
+        End If
+    End With
+    
+    On Error Resume Next
+    wsOut.Activate
+    ActiveWindow.FreezePanes = False
+    wsOut.Range("A2").Select
+    ActiveWindow.FreezePanes = True
+    On Error GoTo 0
+    
+    Application.StatusBar = False
+    Application.ScreenUpdating = True
+    
+    MsgBox (outRow - 2) & " row(s) written to Sheet6.", vbInformation
+
+End Sub
+
+
+' =====================================================================
+' Recursively scans Inbox + subfolders for an exact (case-insensitive)
+' subject match within the last N days. Uses Items.Restrict on
+' ReceivedTime for speed.
+' =====================================================================
+Private Sub SearchInboxFolderBySubject(ByVal olFolder As Object, _
+                                       ByVal targetSubject As String, _
+                                       ByVal cutoffDate As Date, _
+                                       ByVal wsOut As Worksheet, _
+                                       ByRef outRow As Long, _
+                                       ByVal nDays As Long, _
+                                       ByRef hadAnyMatch As Boolean)
+
+    Dim itm As Object
+    Dim subFolder As Object
+    Dim allItems As Object, filteredItems As Object
+    Dim filter As String, dateStr As String
+    Dim subj As String
+    Dim targetLC As String
+    Dim fromAddr As String
+    
+    On Error Resume Next
+    
+    targetLC = LCase$(Trim(targetSubject))
+    
+    ' Build DASL filter: ReceivedTime >= cutoffDate
+    dateStr = Format(cutoffDate, "yyyy-mm-dd hh:nn")
+    filter = "@SQL=" & Chr(34) & "urn:schemas:httpmail:datereceived" & Chr(34) & _
+             " >= '" & dateStr & "'"
+    
+    Set allItems = olFolder.Items
+    allItems.Sort "[ReceivedTime]", True
+    Set filteredItems = allItems.Restrict(filter)
+    
+    For Each itm In filteredItems
+        If itm.Class = 43 Then       ' MailItem
+            subj = Trim(CStr(itm.Subject))
+            If LCase$(subj) = targetLC Then
+                
+                wsOut.Cells(outRow, 1).Value = targetSubject
+                wsOut.Cells(outRow, 2).Value = nDays
+                
+                ' From
+                fromAddr = ""
+                fromAddr = GetSenderSmtp(itm)
+                If Len(fromAddr) = 0 Then fromAddr = CStr(itm.SenderName)
+                wsOut.Cells(outRow, 3).Value = fromAddr
+                
+                wsOut.Cells(outRow, 4).Value = GetRecipients(itm, 1)   ' To
+                wsOut.Cells(outRow, 5).Value = GetRecipients(itm, 2)   ' CC
+                wsOut.Cells(outRow, 6).Value = subj
+                
+                If itm.ReceivedTime > 0 Then
+                    wsOut.Cells(outRow, 7).Value = itm.ReceivedTime
+                Else
+                    wsOut.Cells(outRow, 7).Value = itm.SentOn
+                End If
+                
+                wsOut.Cells(outRow, 8).Value = olFolder.folderPath
+                outRow = outRow + 1
+                hadAnyMatch = True
+            End If
+        End If
+    Next itm
+    
+    ' Recurse into subfolders
+    For Each subFolder In olFolder.Folders
+        SearchInboxFolderBySubject subFolder, targetSubject, cutoffDate, _
+                                   wsOut, outRow, nDays, hadAnyMatch
+    Next subFolder
+    
+    On Error GoTo 0
+End Sub
+
+
+' =====================================================================
+' Helper: writes a single grey "No data found" row for a subject.
+' =====================================================================
+Private Sub WriteNoDataRow(ByVal wsOut As Worksheet, _
+                           ByRef outRow As Long, _
+                           ByVal subjectVal As String, _
+                           ByVal nDaysDisplay As String)
+    wsOut.Cells(outRow, 1).Value = subjectVal
+    wsOut.Cells(outRow, 2).Value = nDaysDisplay
+    wsOut.Cells(outRow, 3).Value = "No data found"
+    wsOut.Cells(outRow, 4).Value = "No data found"
+    wsOut.Cells(outRow, 5).Value = "No data found"
+    wsOut.Cells(outRow, 6).Value = "No data found"
+    wsOut.Cells(outRow, 7).Value = "No data found"
+    wsOut.Cells(outRow, 8).Value = "No data found"
+    wsOut.Range(wsOut.Cells(outRow, 1), wsOut.Cells(outRow, 8)) _
+         .Interior.Color = RGB(242, 242, 242)
+    outRow = outRow + 1
 End Sub
