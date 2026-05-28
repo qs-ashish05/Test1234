@@ -1,0 +1,1215 @@
+Option Explicit
+
+' =====================================================================
+' Macro: SearchEmailsBySubject
+' Purpose: Reads email subjects from Sheet1 Column A, searches Outlook
+'          SENT ITEMS (and subfolders) for emails whose subject EXACTLY
+'          matches the input (case-insensitive), then writes
+'          To / CC / BCC / Date-Time / Folder to Sheet2.
+'          Inputs with no matches are written with "No data found".
+'          Auto-validates To & CC against the "Mail" sheet at the end.
+' =====================================================================
+
+Sub SearchEmailsBySubject()
+
+    Dim wsIn As Worksheet, wsOut As Worksheet
+    Dim olApp As Object, olNS As Object
+    Dim lastRow As Long, i As Long, outRow As Long
+    Dim searchText As String
+    Dim inputs As Collection
+    Dim matchedKeys As Object
+    Dim inputText As Variant
+
+    '------------------------------------------------------------------
+    ' 1. Setup input / output sheets
+    '------------------------------------------------------------------
+    On Error Resume Next
+    Set wsIn = ThisWorkbook.Sheets("Sheet1")
+    Set wsOut = ThisWorkbook.Sheets("Sheet2")
+    On Error GoTo 0
+
+    If wsIn Is Nothing Then
+        MsgBox "Sheet1 not found. Please create Sheet1 with subjects in Column A.", vbExclamation
+        Exit Sub
+    End If
+
+    If wsOut Is Nothing Then
+        Set wsOut = ThisWorkbook.Sheets.Add(After:=wsIn)
+        wsOut.Name = "Sheet2"
+    End If
+
+    wsOut.Cells.Clear
+
+    wsOut.Range("A1:G1").Value = Array("Input Subject", "Matched Subject", _
+                                       "To", "CC", "BCC", "Date & Time", "Folder")
+    wsOut.Range("A1:G1").Font.Bold = True
+    wsOut.Range("A1:G1").Interior.Color = RGB(68, 114, 196)
+    wsOut.Range("A1:G1").Font.Color = RGB(255, 255, 255)
+
+    '------------------------------------------------------------------
+    ' 2. Collect search inputs from Sheet1 Column A
+    '------------------------------------------------------------------
+    lastRow = wsIn.Cells(wsIn.Rows.Count, "A").End(xlUp).Row
+    If lastRow < 1 Or Trim(wsIn.Cells(1, 1).Value) = "" Then
+        MsgBox "No subjects found in Sheet1 Column A.", vbExclamation
+        Exit Sub
+    End If
+
+    Set inputs = New Collection
+    For i = 1 To lastRow
+        searchText = Trim(CStr(wsIn.Cells(i, 1).Value))
+        If Len(searchText) > 0 Then
+            On Error Resume Next
+            inputs.Add searchText, LCase$(searchText)
+            On Error GoTo 0
+        End If
+    Next i
+
+    If inputs.Count = 0 Then
+        MsgBox "No valid subjects to search.", vbExclamation
+        Exit Sub
+    End If
+
+    '------------------------------------------------------------------
+    ' 3. Connect to Outlook
+    '------------------------------------------------------------------
+    On Error Resume Next
+    Set olApp = GetObject(, "Outlook.Application")
+    If olApp Is Nothing Then Set olApp = CreateObject("Outlook.Application")
+    On Error GoTo 0
+
+    If olApp Is Nothing Then
+        MsgBox "Could not connect to Outlook. Make sure Outlook is installed.", vbCritical
+        Exit Sub
+    End If
+
+    Set olNS = olApp.GetNamespace("MAPI")
+
+    Application.ScreenUpdating = False
+    Application.StatusBar = "Searching Outlook Sent Items. Please wait..."
+
+    outRow = 2
+    Set matchedKeys = CreateObject("Scripting.Dictionary")
+
+    '------------------------------------------------------------------
+    ' 4. Search ONLY Sent Items (and its subfolders)
+    '------------------------------------------------------------------
+    SearchFolder olNS.GetDefaultFolder(5), inputs, wsOut, outRow, matchedKeys
+
+    '------------------------------------------------------------------
+    ' 4b. Append "No data found" rows for unmatched inputs
+    '------------------------------------------------------------------
+    For Each inputText In inputs
+        If Not matchedKeys.Exists(LCase$(CStr(inputText))) Then
+            wsOut.Cells(outRow, 1).Value = CStr(inputText)
+            wsOut.Cells(outRow, 2).Value = "No data found"
+            wsOut.Cells(outRow, 3).Value = "No data found"
+            wsOut.Cells(outRow, 4).Value = "No data found"
+            wsOut.Cells(outRow, 5).Value = "No data found"
+            wsOut.Cells(outRow, 6).Value = "No data found"
+            wsOut.Cells(outRow, 7).Value = "No data found"
+            wsOut.Range(wsOut.Cells(outRow, 1), wsOut.Cells(outRow, 7)) _
+                 .Interior.Color = RGB(242, 242, 242)
+            outRow = outRow + 1
+        End If
+    Next inputText
+
+    '------------------------------------------------------------------
+    ' 5. Format output
+    '------------------------------------------------------------------
+    With wsOut
+        .Columns("A:G").AutoFit
+        .Columns("A:G").WrapText = False
+        .Columns("F").NumberFormat = "dd-mmm-yyyy hh:mm AM/PM"
+        If outRow > 2 Then
+            .Range("A1:G" & (outRow - 1)).Borders.LineStyle = xlContinuous
+        End If
+    End With
+
+    On Error Resume Next
+    wsOut.Activate
+    ActiveWindow.FreezePanes = False
+    wsOut.Range("A2").Select
+    ActiveWindow.FreezePanes = True
+    On Error GoTo 0
+
+    '------------------------------------------------------------------
+    ' 6. Auto-validate To & CC against Mail sheet
+    '    Sheet2: To = Col C (3), CC = Col D (4)
+    '------------------------------------------------------------------
+    Application.StatusBar = "Validating To & CC addresses..."
+    ValidateSheet "Sheet2", 3, 4
+
+    Application.StatusBar = False
+    Application.ScreenUpdating = True
+
+    MsgBox (outRow - 2) & " row(s) written to Sheet2. To & CC validation complete.", vbInformation
+
+End Sub
+
+
+' =====================================================================
+' Macro: SearchEmailsByEMailId
+' Purpose: Reads email IDs from Sheet1 Column A, searches Sent Items for
+'          emails where any recipient matches. Writes results to Sheet3.
+'          Inputs with no matches are written with "No data found".
+'          Auto-validates To & CC against the "Mail" sheet at the end.
+' =====================================================================
+
+Sub SearchEmailsByEMailId()
+
+    Dim wsIn As Worksheet, wsOut As Worksheet
+    Dim olApp As Object, olNS As Object
+    Dim lastRow As Long, i As Long, outRow As Long
+    Dim emailId As String
+    Dim inputs As Object
+    Dim matchedKeys As Object
+    Dim key As Variant
+
+    '------------------------------------------------------------------
+    ' 1. Setup sheets
+    '------------------------------------------------------------------
+    On Error Resume Next
+    Set wsIn = ThisWorkbook.Sheets("Sheet1")
+    Set wsOut = ThisWorkbook.Sheets("Sheet3")
+    On Error GoTo 0
+
+    If wsIn Is Nothing Then
+        MsgBox "Sheet1 not found. Please create Sheet1 with email IDs in Column A.", vbExclamation
+        Exit Sub
+    End If
+
+    If wsOut Is Nothing Then
+        Set wsOut = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        wsOut.Name = "Sheet3"
+    End If
+
+    wsOut.Cells.Clear
+
+    wsOut.Range("A1:F1").Value = Array("Input Email ID", "Sent To", "CC", _
+                                       "Subject", "Date & Time", "Folder")
+    wsOut.Range("A1:F1").Font.Bold = True
+    wsOut.Range("A1:F1").Interior.Color = RGB(68, 114, 196)
+    wsOut.Range("A1:F1").Font.Color = RGB(255, 255, 255)
+
+    '------------------------------------------------------------------
+    ' 2. Collect input email IDs
+    '------------------------------------------------------------------
+    lastRow = wsIn.Cells(wsIn.Rows.Count, "A").End(xlUp).Row
+    If lastRow < 1 Or Trim(wsIn.Cells(1, 1).Value) = "" Then
+        MsgBox "No email IDs found in Sheet1 Column A.", vbExclamation
+        Exit Sub
+    End If
+
+    Set inputs = CreateObject("Scripting.Dictionary")
+    For i = 1 To lastRow
+        emailId = LCase$(Trim(CStr(wsIn.Cells(i, 1).Value)))
+        If Len(emailId) > 0 And Not inputs.Exists(emailId) Then
+            inputs.Add emailId, Trim(CStr(wsIn.Cells(i, 1).Value))
+        End If
+    Next i
+
+    If inputs.Count = 0 Then
+        MsgBox "No valid email IDs to search.", vbExclamation
+        Exit Sub
+    End If
+
+    '------------------------------------------------------------------
+    ' 3. Connect to Outlook
+    '------------------------------------------------------------------
+    On Error Resume Next
+    Set olApp = GetObject(, "Outlook.Application")
+    If olApp Is Nothing Then Set olApp = CreateObject("Outlook.Application")
+    On Error GoTo 0
+
+    If olApp Is Nothing Then
+        MsgBox "Could not connect to Outlook. Make sure Outlook is installed.", vbCritical
+        Exit Sub
+    End If
+
+    Set olNS = olApp.GetNamespace("MAPI")
+
+    Application.ScreenUpdating = False
+    Application.StatusBar = "Searching Outlook Sent Items. Please wait..."
+
+    outRow = 2
+    Set matchedKeys = CreateObject("Scripting.Dictionary")
+
+    '------------------------------------------------------------------
+    ' 4. Search Sent Items
+    '------------------------------------------------------------------
+    SearchFolderByEmail olNS.GetDefaultFolder(5), inputs, wsOut, outRow, matchedKeys
+
+    '------------------------------------------------------------------
+    ' 4b. Append "No data found" rows for unmatched inputs
+    '------------------------------------------------------------------
+    For Each key In inputs.Keys
+        If Not matchedKeys.Exists(key) Then
+            wsOut.Cells(outRow, 1).Value = inputs(key)
+            wsOut.Cells(outRow, 2).Value = "No data found"
+            wsOut.Cells(outRow, 3).Value = "No data found"
+            wsOut.Cells(outRow, 4).Value = "No data found"
+            wsOut.Cells(outRow, 5).Value = "No data found"
+            wsOut.Cells(outRow, 6).Value = "No data found"
+            wsOut.Range(wsOut.Cells(outRow, 1), wsOut.Cells(outRow, 6)) _
+                 .Interior.Color = RGB(242, 242, 242)
+            outRow = outRow + 1
+        End If
+    Next key
+
+    '------------------------------------------------------------------
+    ' 5. Format output
+    '------------------------------------------------------------------
+    With wsOut
+        .Columns("A:F").AutoFit
+        .Columns("A:F").WrapText = False
+        .Columns("E").NumberFormat = "dd-mmm-yyyy hh:mm AM/PM"
+        If outRow > 2 Then
+            .Range("A1:F" & (outRow - 1)).Borders.LineStyle = xlContinuous
+        End If
+    End With
+
+    On Error Resume Next
+    wsOut.Activate
+    ActiveWindow.FreezePanes = False
+    wsOut.Range("A2").Select
+    ActiveWindow.FreezePanes = True
+    On Error GoTo 0
+
+    '------------------------------------------------------------------
+    ' 6. Auto-validate To & CC against Mail sheet
+    '    Sheet3: To = Col B (2), CC = Col C (3)
+    '------------------------------------------------------------------
+    Application.StatusBar = "Validating To & CC addresses..."
+    ValidateSheet "Sheet3", 2, 3
+
+    Application.StatusBar = False
+    Application.ScreenUpdating = True
+
+    MsgBox (outRow - 2) & " row(s) written to Sheet3. To & CC validation complete.", vbInformation
+
+End Sub
+
+
+' =====================================================================
+' Macro: SearchAllEmailsByEMailId
+' Purpose: Searches both Inbox and Sent Items for email addresses.
+'          Restricts to last N days from Sheet1 cell B1.
+'          Writes results to Sheet5.
+'          Auto-validates To & CC against the "Mail" sheet at the end.
+' =====================================================================
+
+Sub SearchAllEmailsByEMailId()
+
+    Dim wsIn As Worksheet, wsOut As Worksheet
+    Dim olApp As Object, olNS As Object
+    Dim lastRow As Long, i As Long, outRow As Long
+    Dim emailId As String
+    Dim inputs As Object
+    Dim matchedKeys As Object
+    Dim key As Variant
+    Dim nDays As Long
+    Dim cutoffDate As Date
+
+    '------------------------------------------------------------------
+    ' 1. Setup sheets
+    '------------------------------------------------------------------
+    On Error Resume Next
+    Set wsIn = ThisWorkbook.Sheets("Sheet1")
+    Set wsOut = ThisWorkbook.Sheets("Sheet5")
+    On Error GoTo 0
+
+    If wsIn Is Nothing Then
+        MsgBox "Sheet1 not found. Please create Sheet1 with email IDs in Column A and N (days) in B1.", vbExclamation
+        Exit Sub
+    End If
+
+    If wsOut Is Nothing Then
+        Set wsOut = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        wsOut.Name = "Sheet5"
+    End If
+
+    '------------------------------------------------------------------
+    ' 2. Read N days from Sheet1!B1
+    '------------------------------------------------------------------
+    If Not IsNumeric(wsIn.Range("B1").Value) Then
+        MsgBox "Please enter the number of days (N) in Sheet1 cell B1.", vbExclamation
+        Exit Sub
+    End If
+
+    nDays = CLng(wsIn.Range("B1").Value)
+    If nDays <= 0 Then
+        MsgBox "Number of days in B1 must be greater than 0.", vbExclamation
+        Exit Sub
+    End If
+
+    cutoffDate = DateAdd("d", -nDays, Now)
+
+    wsOut.Cells.Clear
+
+    wsOut.Range("A1:H1").Value = Array("Input Email ID", "Direction", "From", _
+                                       "To", "CC", "Subject", "Date & Time", "Folder")
+    wsOut.Range("A1:H1").Font.Bold = True
+    wsOut.Range("A1:H1").Interior.Color = RGB(68, 114, 196)
+    wsOut.Range("A1:H1").Font.Color = RGB(255, 255, 255)
+
+    '------------------------------------------------------------------
+    ' 3. Collect input email IDs
+    '------------------------------------------------------------------
+    lastRow = wsIn.Cells(wsIn.Rows.Count, "A").End(xlUp).Row
+    If lastRow < 1 Or Trim(wsIn.Cells(1, 1).Value) = "" Then
+        MsgBox "No email IDs found in Sheet1 Column A.", vbExclamation
+        Exit Sub
+    End If
+
+    Set inputs = CreateObject("Scripting.Dictionary")
+    For i = 1 To lastRow
+        emailId = LCase$(Trim(CStr(wsIn.Cells(i, 1).Value)))
+        If Len(emailId) > 0 And Not inputs.Exists(emailId) Then
+            inputs.Add emailId, Trim(CStr(wsIn.Cells(i, 1).Value))
+        End If
+    Next i
+
+    If inputs.Count = 0 Then
+        MsgBox "No valid email IDs to search.", vbExclamation
+        Exit Sub
+    End If
+
+    '------------------------------------------------------------------
+    ' 4. Connect to Outlook
+    '------------------------------------------------------------------
+    On Error Resume Next
+    Set olApp = GetObject(, "Outlook.Application")
+    If olApp Is Nothing Then Set olApp = CreateObject("Outlook.Application")
+    On Error GoTo 0
+
+    If olApp Is Nothing Then
+        MsgBox "Could not connect to Outlook. Make sure Outlook is installed.", vbCritical
+        Exit Sub
+    End If
+
+    Set olNS = olApp.GetNamespace("MAPI")
+
+    Application.ScreenUpdating = False
+    Application.StatusBar = "Searching last " & nDays & " days. Please wait..."
+
+    outRow = 2
+    Set matchedKeys = CreateObject("Scripting.Dictionary")
+
+    '------------------------------------------------------------------
+    ' 5. Search Inbox (Received) and Sent Items (Sent)
+    '------------------------------------------------------------------
+    SearchFolderAllDirections olNS.GetDefaultFolder(6), inputs, wsOut, outRow, _
+                              matchedKeys, "Received", cutoffDate
+    SearchFolderAllDirections olNS.GetDefaultFolder(5), inputs, wsOut, outRow, _
+                              matchedKeys, "Sent", cutoffDate
+
+    '------------------------------------------------------------------
+    ' 5b. No data found rows
+    '------------------------------------------------------------------
+    For Each key In inputs.Keys
+        If Not matchedKeys.Exists(key) Then
+            wsOut.Cells(outRow, 1).Value = inputs(key)
+            wsOut.Cells(outRow, 2).Value = "No data found"
+            wsOut.Cells(outRow, 3).Value = "No data found"
+            wsOut.Cells(outRow, 4).Value = "No data found"
+            wsOut.Cells(outRow, 5).Value = "No data found"
+            wsOut.Cells(outRow, 6).Value = "No data found"
+            wsOut.Cells(outRow, 7).Value = "No data found"
+            wsOut.Cells(outRow, 8).Value = "No data found"
+            wsOut.Range(wsOut.Cells(outRow, 1), wsOut.Cells(outRow, 8)) _
+                 .Interior.Color = RGB(242, 242, 242)
+            outRow = outRow + 1
+        End If
+    Next key
+
+    '------------------------------------------------------------------
+    ' 6. Format output
+    '------------------------------------------------------------------
+    With wsOut
+        .Columns("A:H").AutoFit
+        .Columns("A:H").WrapText = False
+        .Columns("G").NumberFormat = "dd-mmm-yyyy hh:mm AM/PM"
+        If outRow > 2 Then
+            .Range("A1:H" & (outRow - 1)).Borders.LineStyle = xlContinuous
+        End If
+    End With
+
+    If outRow > 3 Then
+        With wsOut.Sort
+            .SortFields.Clear
+            .SortFields.Add key:=wsOut.Range("A2:A" & (outRow - 1)), Order:=xlAscending
+            .SortFields.Add key:=wsOut.Range("G2:G" & (outRow - 1)), Order:=xlDescending
+            .SetRange wsOut.Range("A1:H" & (outRow - 1))
+            .Header = xlYes
+            .Apply
+        End With
+    End If
+
+    On Error Resume Next
+    wsOut.Activate
+    ActiveWindow.FreezePanes = False
+    wsOut.Range("A2").Select
+    ActiveWindow.FreezePanes = True
+    On Error GoTo 0
+
+    '------------------------------------------------------------------
+    ' 7. Auto-validate To & CC against Mail sheet
+    '    Sheet5: To = Col D (4), CC = Col E (5)
+    '------------------------------------------------------------------
+    Application.StatusBar = "Validating To & CC addresses..."
+    ValidateSheet "Sheet5", 4, 5
+
+    Application.StatusBar = False
+    Application.ScreenUpdating = True
+
+    MsgBox (outRow - 2) & " row(s) written to Sheet5 (last " & nDays & " days). To & CC validation complete.", vbInformation
+
+End Sub
+
+
+' =====================================================================
+' Macro: SearchInboxBySubject
+' Purpose: For each (Subject, N-days) pair in Sheet1, searches Inbox
+'          for exact subject match within the last N days.
+'          Writes results to Sheet6.
+'          Auto-validates To & CC against the "Mail" sheet at the end.
+' =====================================================================
+
+Sub SearchInboxBySubject()
+
+    Dim wsIn As Worksheet, wsOut As Worksheet
+    Dim olApp As Object, olNS As Object
+    Dim inboxRoot As Object
+    Dim lastRow As Long, i As Long, outRow As Long
+    Dim subj As String
+    Dim daysVal As Variant
+    Dim nDays As Long
+    Dim cutoffDate As Date
+    Dim hadAnyMatch As Boolean
+
+    '------------------------------------------------------------------
+    ' 1. Setup sheets
+    '------------------------------------------------------------------
+    On Error Resume Next
+    Set wsIn = ThisWorkbook.Sheets("Sheet1")
+    Set wsOut = ThisWorkbook.Sheets("Sheet6")
+    On Error GoTo 0
+
+    If wsIn Is Nothing Then
+        MsgBox "Sheet1 not found. Col A = Subject, Col B = N (days).", vbExclamation
+        Exit Sub
+    End If
+
+    If wsOut Is Nothing Then
+        Set wsOut = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        wsOut.Name = "Sheet6"
+    End If
+
+    wsOut.Cells.Clear
+
+    wsOut.Range("A1:H1").Value = Array("Input Subject", "Last N Days", "From", _
+                                       "To", "CC", "Matched Subject", _
+                                       "Date & Time", "Folder")
+    wsOut.Range("A1:H1").Font.Bold = True
+    wsOut.Range("A1:H1").Interior.Color = RGB(68, 114, 196)
+    wsOut.Range("A1:H1").Font.Color = RGB(255, 255, 255)
+
+    '------------------------------------------------------------------
+    ' 2. Connect to Outlook
+    '------------------------------------------------------------------
+    On Error Resume Next
+    Set olApp = GetObject(, "Outlook.Application")
+    If olApp Is Nothing Then Set olApp = CreateObject("Outlook.Application")
+    On Error GoTo 0
+
+    If olApp Is Nothing Then
+        MsgBox "Could not connect to Outlook. Make sure Outlook is installed.", vbCritical
+        Exit Sub
+    End If
+
+    Set olNS = olApp.GetNamespace("MAPI")
+    Set inboxRoot = olNS.GetDefaultFolder(6)
+
+    '------------------------------------------------------------------
+    ' 3. Loop over each (Subject, N-days) row in Sheet1
+    '------------------------------------------------------------------
+    lastRow = wsIn.Cells(wsIn.Rows.Count, "A").End(xlUp).Row
+    If lastRow < 1 Or Trim(wsIn.Cells(1, 1).Value) = "" Then
+        MsgBox "No subjects found in Sheet1 Column A.", vbExclamation
+        Exit Sub
+    End If
+
+    Application.ScreenUpdating = False
+    Application.StatusBar = "Searching Inbox..."
+
+    outRow = 2
+
+    For i = 1 To lastRow
+        subj = Trim(CStr(wsIn.Cells(i, 1).Value))
+        If Len(subj) > 0 Then
+            daysVal = wsIn.Cells(i, 2).Value
+            If Not IsNumeric(daysVal) Then
+                WriteNoDataRow wsOut, outRow, subj, "Invalid N in B" & i
+            Else
+                nDays = CLng(daysVal)
+                If nDays <= 0 Then
+                    WriteNoDataRow wsOut, outRow, subj, "Invalid N in B" & i
+                Else
+                    cutoffDate = DateAdd("d", -nDays, Now)
+                    hadAnyMatch = False
+
+                    Application.StatusBar = "Row " & i & " of " & lastRow & _
+                        ": '" & subj & "' (last " & nDays & " days)..."
+
+                    SearchInboxFolderBySubject inboxRoot, subj, cutoffDate, _
+                                               wsOut, outRow, nDays, hadAnyMatch
+
+                    If Not hadAnyMatch Then
+                        WriteNoDataRow wsOut, outRow, subj, CStr(nDays)
+                    End If
+                End If
+            End If
+        End If
+    Next i
+
+    '------------------------------------------------------------------
+    ' 4. Format output
+    '------------------------------------------------------------------
+    With wsOut
+        .Columns("A:H").AutoFit
+        .Columns("A:H").WrapText = False
+        .Columns("G").NumberFormat = "dd-mmm-yyyy hh:mm AM/PM"
+        If outRow > 2 Then
+            .Range("A1:H" & (outRow - 1)).Borders.LineStyle = xlContinuous
+        End If
+    End With
+
+    On Error Resume Next
+    wsOut.Activate
+    ActiveWindow.FreezePanes = False
+    wsOut.Range("A2").Select
+    ActiveWindow.FreezePanes = True
+    On Error GoTo 0
+
+    '------------------------------------------------------------------
+    ' 5. Auto-validate To & CC against Mail sheet
+    '    Sheet6: To = Col D (4), CC = Col E (5)
+    '------------------------------------------------------------------
+    Application.StatusBar = "Validating To & CC addresses..."
+    ValidateSheet "Sheet6", 4, 5
+
+    Application.StatusBar = False
+    Application.ScreenUpdating = True
+
+    MsgBox (outRow - 2) & " row(s) written to Sheet6. To & CC validation complete.", vbInformation
+
+End Sub
+
+
+' =====================================================================
+' SHARED HELPER: ValidateSheet
+' Called automatically at the end of each macro.
+' Loads valid emails from "Mail" sheet and inserts/updates
+' "To Valid?" and "CC Valid?" columns right after the CC column.
+' If Mail sheet is missing, skips validation with a warning.
+' =====================================================================
+
+Private Sub ValidateSheet(ByVal sheetName As String, _
+                          ByVal toCol As Integer, _
+                          ByVal ccCol As Integer)
+
+    Dim wsMail As Worksheet
+    Dim ws As Worksheet
+    Dim validEmails As Object
+    Dim mailLastRow As Long
+    Dim mailAddr As String
+    Dim r As Long
+    Dim lastRow As Long
+    Dim toValidCol As Integer
+    Dim ccValidCol As Integer
+    Dim col As Integer
+    Dim i As Long
+    Dim cellVal As String
+
+    '------------------------------------------------------------------
+    ' Load valid emails from Mail sheet
+    '------------------------------------------------------------------
+    On Error Resume Next
+    Set wsMail = ThisWorkbook.Sheets("Mail")
+    On Error GoTo 0
+
+    If wsMail Is Nothing Then
+        MsgBox "Warning: 'Mail' sheet not found. To & CC validation was skipped." & vbCrLf & _
+               "Please create a sheet named 'Mail' with valid email addresses in Column A.", _
+               vbExclamation, "Mail Sheet Missing"
+        Exit Sub
+    End If
+
+    Set validEmails = CreateObject("Scripting.Dictionary")
+    validEmails.CompareMode = 1     ' case-insensitive
+
+    mailLastRow = wsMail.Cells(wsMail.Rows.Count, "A").End(xlUp).Row
+    For r = 1 To mailLastRow
+        mailAddr = Trim(LCase(CStr(wsMail.Cells(r, 1).Value)))
+        If Len(mailAddr) > 0 And InStr(mailAddr, "@") > 0 Then
+            If Not validEmails.Exists(mailAddr) Then
+                validEmails.Add mailAddr, True
+            End If
+        End If
+    Next r
+
+    If validEmails.Count = 0 Then Exit Sub
+
+    '------------------------------------------------------------------
+    ' Get the output sheet
+    '------------------------------------------------------------------
+    On Error Resume Next
+    Set ws = ThisWorkbook.Sheets(sheetName)
+    On Error GoTo 0
+    If ws Is Nothing Then Exit Sub
+
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    If lastRow < 2 Then Exit Sub
+
+    '------------------------------------------------------------------
+    ' Find existing headers or insert new columns after CC column
+    '------------------------------------------------------------------
+    toValidCol = 0
+    ccValidCol = 0
+
+    For col = 1 To ws.UsedRange.Columns.Count + 4
+        If Trim(CStr(ws.Cells(1, col).Value)) = "To Valid?" Then toValidCol = col
+        If Trim(CStr(ws.Cells(1, col).Value)) = "CC Valid?" Then ccValidCol = col
+    Next col
+
+    If toValidCol = 0 Then
+        toValidCol = ccCol + 1
+        ccValidCol = ccCol + 2
+
+        ws.Columns(toValidCol).Insert Shift:=xlShiftToRight
+        ws.Columns(ccValidCol).Insert Shift:=xlShiftToRight
+
+        With ws.Cells(1, toValidCol)
+            .Value = "To Valid?"
+            .Font.Bold = True
+            .Interior.Color = RGB(68, 114, 196)
+            .Font.Color = RGB(255, 255, 255)
+        End With
+
+        With ws.Cells(1, ccValidCol)
+            .Value = "CC Valid?"
+            .Font.Bold = True
+            .Interior.Color = RGB(68, 114, 196)
+            .Font.Color = RGB(255, 255, 255)
+        End With
+    End If
+
+    '------------------------------------------------------------------
+    ' Write Valid / Invalid / N/A for every data row
+    '------------------------------------------------------------------
+    For i = 2 To lastRow
+        cellVal = Trim(CStr(ws.Cells(i, toCol).Value))
+        ws.Cells(i, toValidCol).Value = CheckEmailCell(cellVal, validEmails)
+
+        cellVal = Trim(CStr(ws.Cells(i, ccCol).Value))
+        ws.Cells(i, ccValidCol).Value = CheckEmailCell(cellVal, validEmails)
+    Next i
+
+    ws.Columns(toValidCol).AutoFit
+    ws.Columns(ccValidCol).AutoFit
+
+End Sub
+
+
+' =====================================================================
+' SHARED HELPER: CheckEmailCell
+' Splits a cell on "; " and checks each address against validEmails.
+' Returns:
+'   "N/A"                        empty or "No data found"
+'   "Valid"                      all addresses found in Mail sheet
+'   "Invalid: x@a.com; y@b.com" only the bad addresses listed
+' =====================================================================
+
+Private Function CheckEmailCell(ByVal cellValue As String, _
+                                ByVal validEmails As Object) As String
+
+    If Len(cellValue) = 0 Or LCase(cellValue) = "no data found" Then
+        CheckEmailCell = "N/A"
+        Exit Function
+    End If
+
+    Dim parts() As String
+    parts = Split(cellValue, "; ")
+
+    Dim invalidList As String
+    Dim addr As String
+    Dim addrLC As String
+    Dim p As Integer
+
+    invalidList = ""
+
+    For p = 0 To UBound(parts)
+        addr = Trim(parts(p))
+        addrLC = LCase(addr)
+
+        If Len(addr) = 0 Then GoTo NextPart
+        If InStr(addrLC, "@") = 0 Then GoTo NextPart   ' display name, skip
+
+        If Not validEmails.Exists(addrLC) Then
+            If Len(invalidList) = 0 Then
+                invalidList = addr
+            Else
+                invalidList = invalidList & "; " & addr
+            End If
+        End If
+
+NextPart:
+    Next p
+
+    If Len(invalidList) = 0 Then
+        CheckEmailCell = "Valid"
+    Else
+        CheckEmailCell = "Invalid: " & invalidList
+    End If
+
+End Function
+
+
+' =====================================================================
+' SHARED HELPER: GetRecipients
+' Returns semicolon-separated cleaned recipients of a given type.
+' recipType: 1 = To, 2 = CC, 3 = BCC
+' =====================================================================
+
+Private Function GetRecipients(ByVal mailItem As Object, _
+                               ByVal recipType As Integer) As String
+    Dim r As Object
+    Dim regEx As Object
+    Dim result As String
+    Dim addr As String, dispName As String, cleanVal As String
+
+    Set regEx = CreateObject("VBScript.RegExp")
+    regEx.Global = False
+    regEx.IgnoreCase = True
+    regEx.Pattern = "[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
+
+    On Error Resume Next
+    For Each r In mailItem.Recipients
+        If r.Type = recipType Then
+            dispName = Trim(CStr(r.Name))
+            addr = ""
+            addr = r.AddressEntry.GetExchangeUser.PrimarySmtpAddress
+            If addr = "" Then addr = CStr(r.Address)
+
+            If regEx.Test(addr) Then
+                cleanVal = regEx.Execute(addr)(0).Value
+            ElseIf regEx.Test(dispName) Then
+                cleanVal = regEx.Execute(dispName)(0).Value
+            Else
+                cleanVal = dispName
+            End If
+
+            If Len(cleanVal) > 0 Then
+                If Len(result) = 0 Then
+                    result = cleanVal
+                Else
+                    result = result & "; " & cleanVal
+                End If
+            End If
+        End If
+    Next r
+    On Error GoTo 0
+
+    Set regEx = Nothing
+    GetRecipients = result
+End Function
+
+
+' =====================================================================
+' SHARED HELPER: GetSenderSmtp
+' Resolves sender SMTP address from a MailItem.
+' =====================================================================
+
+Private Function GetSenderSmtp(ByVal mailItem As Object) As String
+    Dim addr As String
+    Dim sender As Object
+    Dim exUser As Object
+    Dim exDL As Object
+
+    On Error Resume Next
+
+    addr = ""
+
+    If mailItem.SenderEmailType = "EX" Then
+        Set sender = mailItem.sender
+        If Not sender Is Nothing Then
+            Set exUser = sender.GetExchangeUser
+            If Not exUser Is Nothing Then addr = exUser.PrimarySmtpAddress
+            If addr = "" Then
+                Set exDL = sender.GetExchangeDistributionList
+                If Not exDL Is Nothing Then addr = exDL.PrimarySmtpAddress
+            End If
+        End If
+    End If
+
+    If addr = "" Then addr = CStr(mailItem.SenderEmailAddress)
+
+    If InStr(1, addr, "/O=", vbTextCompare) > 0 Or InStr(addr, "@") = 0 Then
+        addr = ""
+    End If
+
+    On Error GoTo 0
+    GetSenderSmtp = addr
+End Function
+
+
+' =====================================================================
+' SHARED HELPER: WriteRow
+' Writes a single result row to the output sheet.
+' =====================================================================
+
+Private Sub WriteRow(ByVal wsOut As Worksheet, _
+                     ByRef outRow As Long, _
+                     ByVal inputDisplay As String, _
+                     ByVal direction As String, _
+                     ByVal itm As Object, _
+                     ByVal folderPath As String)
+
+    Dim fromAddr As String
+
+    On Error Resume Next
+
+    wsOut.Cells(outRow, 1).Value = inputDisplay
+    wsOut.Cells(outRow, 2).Value = direction
+
+    fromAddr = GetSenderSmtp(itm)
+    If Len(fromAddr) = 0 Then fromAddr = CStr(itm.SenderName)
+    wsOut.Cells(outRow, 3).Value = fromAddr
+
+    wsOut.Cells(outRow, 4).Value = GetRecipients(itm, 1)
+    wsOut.Cells(outRow, 5).Value = GetRecipients(itm, 2)
+    wsOut.Cells(outRow, 6).Value = CStr(itm.Subject)
+
+    If direction = "Received" Then
+        If itm.ReceivedTime > 0 Then
+            wsOut.Cells(outRow, 7).Value = itm.ReceivedTime
+        Else
+            wsOut.Cells(outRow, 7).Value = itm.SentOn
+        End If
+    Else
+        If itm.SentOn > 0 Then
+            wsOut.Cells(outRow, 7).Value = itm.SentOn
+        Else
+            wsOut.Cells(outRow, 7).Value = itm.ReceivedTime
+        End If
+    End If
+
+    wsOut.Cells(outRow, 8).Value = folderPath
+    outRow = outRow + 1
+
+    On Error GoTo 0
+End Sub
+
+
+' =====================================================================
+' SHARED HELPER: SearchFolder (used by SearchEmailsBySubject)
+' =====================================================================
+
+Private Sub SearchFolder(ByVal olFolder As Object, _
+                         ByVal inputs As Collection, _
+                         ByVal wsOut As Worksheet, _
+                         ByRef outRow As Long, _
+                         ByVal matchedKeys As Object)
+
+    Dim itm As Object
+    Dim subFolder As Object
+    Dim subj As String, subjLC As String
+    Dim inputText As Variant, inputLC As String
+
+    On Error Resume Next
+
+    Application.StatusBar = "Searching: " & olFolder.folderPath & " ..."
+
+    For Each itm In olFolder.Items
+        If itm.Class = 43 Then
+            subj = Trim(CStr(itm.Subject))
+            subjLC = LCase$(subj)
+
+            For Each inputText In inputs
+                inputLC = LCase$(Trim(CStr(inputText)))
+                If subjLC = inputLC Then
+                    wsOut.Cells(outRow, 1).Value = CStr(inputText)
+                    wsOut.Cells(outRow, 2).Value = subj
+                    wsOut.Cells(outRow, 3).Value = GetRecipients(itm, 1)
+                    wsOut.Cells(outRow, 4).Value = GetRecipients(itm, 2)
+                    wsOut.Cells(outRow, 5).Value = GetRecipients(itm, 3)
+
+                    If itm.SentOn > 0 Then
+                        wsOut.Cells(outRow, 6).Value = itm.SentOn
+                    Else
+                        wsOut.Cells(outRow, 6).Value = itm.ReceivedTime
+                    End If
+
+                    wsOut.Cells(outRow, 7).Value = olFolder.folderPath
+                    outRow = outRow + 1
+
+                    If Not matchedKeys.Exists(inputLC) Then matchedKeys.Add inputLC, True
+                    Exit For
+                End If
+            Next inputText
+        End If
+    Next itm
+
+    For Each subFolder In olFolder.Folders
+        SearchFolder subFolder, inputs, wsOut, outRow, matchedKeys
+    Next subFolder
+
+    On Error GoTo 0
+End Sub
+
+
+' =====================================================================
+' SHARED HELPER: SearchFolderByEmail (used by SearchEmailsByEMailId)
+' =====================================================================
+
+Private Sub SearchFolderByEmail(ByVal olFolder As Object, _
+                                ByVal inputs As Object, _
+                                ByVal wsOut As Worksheet, _
+                                ByRef outRow As Long, _
+                                ByVal matchedKeys As Object)
+
+    Dim itm As Object
+    Dim subFolder As Object
+    Dim r As Object
+    Dim addr As String, addrLC As String
+    Dim mailAddrs As Object
+    Dim key As Variant
+
+    On Error Resume Next
+
+    Application.StatusBar = "Searching: " & olFolder.folderPath & " ..."
+
+    For Each itm In olFolder.Items
+        If itm.Class = 43 Then
+            Set mailAddrs = CreateObject("Scripting.Dictionary")
+            For Each r In itm.Recipients
+                addr = ""
+                addr = r.AddressEntry.GetExchangeUser.PrimarySmtpAddress
+                If addr = "" Then addr = CStr(r.Address)
+                addrLC = LCase$(Trim(addr))
+                If Len(addrLC) > 0 And InStr(addrLC, "@") > 0 Then
+                    If Not mailAddrs.Exists(addrLC) Then mailAddrs.Add addrLC, True
+                End If
+            Next r
+
+            For Each key In inputs.Keys
+                If mailAddrs.Exists(key) Then
+                    wsOut.Cells(outRow, 1).Value = inputs(key)
+                    wsOut.Cells(outRow, 2).Value = GetRecipients(itm, 1)
+                    wsOut.Cells(outRow, 3).Value = GetRecipients(itm, 2)
+                    wsOut.Cells(outRow, 4).Value = CStr(itm.Subject)
+
+                    If itm.SentOn > 0 Then
+                        wsOut.Cells(outRow, 5).Value = itm.SentOn
+                    Else
+                        wsOut.Cells(outRow, 5).Value = itm.ReceivedTime
+                    End If
+
+                    wsOut.Cells(outRow, 6).Value = olFolder.folderPath
+                    outRow = outRow + 1
+
+                    If Not matchedKeys.Exists(key) Then matchedKeys.Add key, True
+                End If
+            Next key
+        End If
+    Next itm
+
+    For Each subFolder In olFolder.Folders
+        SearchFolderByEmail subFolder, inputs, wsOut, outRow, matchedKeys
+    Next subFolder
+
+    On Error GoTo 0
+End Sub
+
+
+' =====================================================================
+' SHARED HELPER: SearchFolderAllDirections (used by SearchAllEmailsByEMailId)
+' =====================================================================
+
+Private Sub SearchFolderAllDirections(ByVal olFolder As Object, _
+                                      ByVal inputs As Object, _
+                                      ByVal wsOut As Worksheet, _
+                                      ByRef outRow As Long, _
+                                      ByVal matchedKeys As Object, _
+                                      ByVal direction As String, _
+                                      ByVal cutoffDate As Date)
+
+    Dim itm As Object
+    Dim subFolder As Object
+    Dim r As Object
+    Dim addr As String, addrLC As String
+    Dim senderAddr As String, senderLC As String
+    Dim mailAddrs As Object
+    Dim key As Variant
+    Dim allItems As Object
+    Dim filteredItems As Object
+    Dim filter As String
+    Dim dateField As String
+    Dim dateStr As String
+
+    On Error Resume Next
+
+    Application.StatusBar = "Searching: " & olFolder.folderPath & " ..."
+
+    If direction = "Received" Then
+        dateField = "urn:schemas:httpmail:datereceived"
+    Else
+        dateField = "urn:schemas:httpmail:datesent"
+    End If
+
+    dateStr = Format(cutoffDate, "yyyy-mm-dd hh:nn")
+    filter = "@SQL=" & Chr(34) & dateField & Chr(34) & " >= '" & dateStr & "'"
+
+    Set allItems = olFolder.Items
+    allItems.Sort "[" & IIf(direction = "Received", "ReceivedTime", "SentOn") & "]", True
+    Set filteredItems = allItems.Restrict(filter)
+
+    For Each itm In filteredItems
+        If itm.Class = 43 Then
+            If direction = "Received" Then
+                senderAddr = GetSenderSmtp(itm)
+                senderLC = LCase$(Trim(senderAddr))
+                If Len(senderLC) > 0 Then
+                    If inputs.Exists(senderLC) Then
+                        WriteRow wsOut, outRow, inputs(senderLC), "Received", _
+                                 itm, olFolder.folderPath
+                        If Not matchedKeys.Exists(senderLC) Then _
+                            matchedKeys.Add senderLC, True
+                    End If
+                End If
+            Else
+                Set mailAddrs = CreateObject("Scripting.Dictionary")
+                For Each r In itm.Recipients
+                    addr = ""
+                    addr = r.AddressEntry.GetExchangeUser.PrimarySmtpAddress
+                    If addr = "" Then addr = CStr(r.Address)
+                    addrLC = LCase$(Trim(addr))
+                    If Len(addrLC) > 0 And InStr(addrLC, "@") > 0 Then
+                        If Not mailAddrs.Exists(addrLC) Then _
+                            mailAddrs.Add addrLC, True
+                    End If
+                Next r
+
+                For Each key In inputs.Keys
+                    If mailAddrs.Exists(key) Then
+                        WriteRow wsOut, outRow, inputs(key), "Sent", _
+                                 itm, olFolder.folderPath
+                        If Not matchedKeys.Exists(key) Then _
+                            matchedKeys.Add key, True
+                    End If
+                Next key
+            End If
+        End If
+    Next itm
+
+    For Each subFolder In olFolder.Folders
+        SearchFolderAllDirections subFolder, inputs, wsOut, outRow, _
+                                  matchedKeys, direction, cutoffDate
+    Next subFolder
+
+    On Error GoTo 0
+End Sub
+
+
+' =====================================================================
+' SHARED HELPER: SearchInboxFolderBySubject (used by SearchInboxBySubject)
+' =====================================================================
+
+Private Sub SearchInboxFolderBySubject(ByVal olFolder As Object, _
+                                       ByVal targetSubject As String, _
+                                       ByVal cutoffDate As Date, _
+                                       ByVal wsOut As Worksheet, _
+                                       ByRef outRow As Long, _
+                                       ByVal nDays As Long, _
+                                       ByRef hadAnyMatch As Boolean)
+
+    Dim itm As Object
+    Dim subFolder As Object
+    Dim allItems As Object, filteredItems As Object
+    Dim filter As String, dateStr As String
+    Dim subj As String
+    Dim targetLC As String
+    Dim fromAddr As String
+
+    On Error Resume Next
+
+    targetLC = LCase$(Trim(targetSubject))
+
+    dateStr = Format(cutoffDate, "yyyy-mm-dd hh:nn")
+    filter = "@SQL=" & Chr(34) & "urn:schemas:httpmail:datereceived" & Chr(34) & _
+             " >= '" & dateStr & "'"
+
+    Set allItems = olFolder.Items
+    allItems.Sort "[ReceivedTime]", True
+    Set filteredItems = allItems.Restrict(filter)
+
+    For Each itm In filteredItems
+        If itm.Class = 43 Then
+            subj = Trim(CStr(itm.Subject))
+            If LCase$(subj) = targetLC Then
+
+                wsOut.Cells(outRow, 1).Value = targetSubject
+                wsOut.Cells(outRow, 2).Value = nDays
+
+                fromAddr = ""
+                fromAddr = GetSenderSmtp(itm)
+                If Len(fromAddr) = 0 Then fromAddr = CStr(itm.SenderName)
+                wsOut.Cells(outRow, 3).Value = fromAddr
+
+                wsOut.Cells(outRow, 4).Value = GetRecipients(itm, 1)
+                wsOut.Cells(outRow, 5).Value = GetRecipients(itm, 2)
+                wsOut.Cells(outRow, 6).Value = subj
+
+                If itm.ReceivedTime > 0 Then
+                    wsOut.Cells(outRow, 7).Value = itm.ReceivedTime
+                Else
+                    wsOut.Cells(outRow, 7).Value = itm.SentOn
+                End If
+
+                wsOut.Cells(outRow, 8).Value = olFolder.folderPath
+                outRow = outRow + 1
+                hadAnyMatch = True
+            End If
+        End If
+    Next itm
+
+    For Each subFolder In olFolder.Folders
+        SearchInboxFolderBySubject subFolder, targetSubject, cutoffDate, _
+                                   wsOut, outRow, nDays, hadAnyMatch
+    Next subFolder
+
+    On Error GoTo 0
+End Sub
+
+
+' =====================================================================
+' SHARED HELPER: WriteNoDataRow (used by SearchInboxBySubject)
+' =====================================================================
+
+Private Sub WriteNoDataRow(ByVal wsOut As Worksheet, _
+                           ByRef outRow As Long, _
+                           ByVal subjectVal As String, _
+                           ByVal nDaysDisplay As String)
+    wsOut.Cells(outRow, 1).Value = subjectVal
+    wsOut.Cells(outRow, 2).Value = nDaysDisplay
+    wsOut.Cells(outRow, 3).Value = "No data found"
+    wsOut.Cells(outRow, 4).Value = "No data found"
+    wsOut.Cells(outRow, 5).Value = "No data found"
+    wsOut.Cells(outRow, 6).Value = "No data found"
+    wsOut.Cells(outRow, 7).Value = "No data found"
+    wsOut.Cells(outRow, 8).Value = "No data found"
+    wsOut.Range(wsOut.Cells(outRow, 1), wsOut.Cells(outRow, 8)) _
+         .Interior.Color = RGB(242, 242, 242)
+    outRow = outRow + 1
+End Sub
